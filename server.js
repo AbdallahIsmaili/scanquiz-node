@@ -87,7 +87,17 @@ app.post("/register", async (req, res) => {
             console.error("Error registering user:", err);
             return res.status(500).send("Error registering user");
           }
-          res.status(201).send("User registered");
+
+          // Generate token and log in the user directly
+          const token = jwt.sign(
+            { id: results.insertId, fullname, email },
+            process.env.JWT_SECRET,
+            {
+              expiresIn: "24h",
+            }
+          );
+
+          res.json({ token });
         }
       );
     });
@@ -179,8 +189,10 @@ app.post("/save-quiz", authenticateToken, (req, res) => {
   );
 });
 
+// Route to get quizzes
 app.get("/api/quizzes", authenticateToken, (req, res) => {
-  db.query("SELECT * FROM Quizzes", (err, results) => {
+  const userId = req.user.id; // assuming userId is set in authenticateToken middleware
+  db.query("SELECT * FROM Quizzes WHERE user_id = ?", [userId], (err, results) => {
     if (err) {
       console.error("Error fetching quizzes:", err);
       return res.status(500).send("Error fetching quizzes");
@@ -188,6 +200,7 @@ app.get("/api/quizzes", authenticateToken, (req, res) => {
     res.json(results);
   });
 });
+
 
 app.delete("/api/quizzes/:quizId", authenticateToken, (req, res) => {
   const { quizId } = req.params;
