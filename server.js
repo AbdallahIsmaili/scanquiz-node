@@ -332,14 +332,46 @@ app.get("/api/quizzes/:quizId", authenticateToken, (req, res) => {
 app.get("/api/quizzes/:quizId/questions", authenticateToken, (req, res) => {
   const { quizId } = req.params;
 
-  db.query("SELECT * FROM Questions WHERE quiz_id = ?", [quizId], (err, results) => {
+  const query = `
+    SELECT q.id AS question_id, q.question_text, q.question_type, q.box_size,
+           c.id AS choice_id, c.choice_text, c.is_correct
+    FROM Questions q
+    LEFT JOIN Choices c ON q.id = c.question_id
+    WHERE q.quiz_id = ?`;
+
+  db.query(query, [quizId], (err, results) => {
     if (err) {
       console.error("Error fetching questions:", err);
       return res.status(500).send("Error fetching questions");
     }
-    res.json(results);
+
+    // Structure the response correctly
+    const questionsMap = new Map();
+
+    results.forEach((row) => {
+      if (!questionsMap.has(row.question_id)) {
+        questionsMap.set(row.question_id, {
+          id: row.question_id,
+          question_text: row.question_text,
+          question_type: row.question_type,
+          box_size: row.box_size,
+          choices: [],
+        });
+      }
+
+      if (row.choice_id) {
+        questionsMap.get(row.question_id).choices.push({
+          id: row.choice_id,
+          choice_text: row.choice_text,
+          is_correct: row.is_correct,
+        });
+      }
+    });
+
+    res.json([...questionsMap.values()]);
   });
 });
+
 
 // questions routes
 app.get("/api/questions/:questionId", authenticateToken, (req, res) => {
