@@ -4,9 +4,17 @@ const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 require("dotenv").config();
+const multer = require("multer");
+const fs = require("fs");
+const pdfParse = require("pdf-parse");
+const Tesseract = require("tesseract.js");
+const path = require("path");
+const { exec } = require("child_process");
+const sharp = require("sharp");
 
 const app = express();
 const port = process.env.PORT || 3001;
+const upload = multer({ dest: "uploads/" });
 
 app.use(cors());
 app.use(express.json());
@@ -54,7 +62,6 @@ const authenticateToken = (req, res, next) => {
     next();
   });
 };
-
 
 // ROUTES:
 
@@ -161,7 +168,9 @@ app.post("/save-quiz", authenticateToken, (req, res) => {
           (err, questionResult) => {
             if (err) {
               console.error(`Error saving question ${questionIndex + 1}:`, err);
-              return res.status(500).send(`Error saving question ${questionIndex + 1}`);
+              return res
+                .status(500)
+                .send(`Error saving question ${questionIndex + 1}`);
             }
 
             const questionId = questionResult.insertId;
@@ -173,8 +182,19 @@ app.post("/save-quiz", authenticateToken, (req, res) => {
                   [questionId, choice.text, choice.isCorrect],
                   (err) => {
                     if (err) {
-                      console.error(`Error saving choice ${choiceIndex + 1} for question ${questionIndex + 1}:`, err);
-                      return res.status(500).send(`Error saving choice ${choiceIndex + 1} for question ${questionIndex + 1}`);
+                      console.error(
+                        `Error saving choice ${choiceIndex + 1} for question ${
+                          questionIndex + 1
+                        }:`,
+                        err
+                      );
+                      return res
+                        .status(500)
+                        .send(
+                          `Error saving choice ${
+                            choiceIndex + 1
+                          } for question ${questionIndex + 1}`
+                        );
                     }
                   }
                 );
@@ -192,15 +212,18 @@ app.post("/save-quiz", authenticateToken, (req, res) => {
 // Route to get quizzes
 app.get("/api/quizzes", authenticateToken, (req, res) => {
   const userId = req.user.id; // assuming userId is set in authenticateToken middleware
-  db.query("SELECT * FROM Quizzes WHERE user_id = ?", [userId], (err, results) => {
-    if (err) {
-      console.error("Error fetching quizzes:", err);
-      return res.status(500).send("Error fetching quizzes");
+  db.query(
+    "SELECT * FROM Quizzes WHERE user_id = ?",
+    [userId],
+    (err, results) => {
+      if (err) {
+        console.error("Error fetching quizzes:", err);
+        return res.status(500).send("Error fetching quizzes");
+      }
+      res.json(results);
     }
-    res.json(results);
-  });
+  );
 });
-
 
 app.delete("/api/quizzes/:quizId", authenticateToken, (req, res) => {
   const { quizId } = req.params;
@@ -372,7 +395,6 @@ app.get("/api/quizzes/:quizId/questions", authenticateToken, (req, res) => {
   });
 });
 
-
 // questions routes
 app.get("/api/questions/:questionId", authenticateToken, (req, res) => {
   const { questionId } = req.params;
@@ -459,12 +481,9 @@ app.put("/api/questions/:questionId", authenticateToken, (req, res) => {
           choices.map((choice) => choice.choice_text)
         );
         if (uniqueChoices.size !== choices.length) {
-          return res
-            .status(400)
-            .json({
-              error:
-                "Duplicate answers are not allowed within the same question",
-            });
+          return res.status(400).json({
+            error: "Duplicate answers are not allowed within the same question",
+          });
         }
       }
 
@@ -547,6 +566,149 @@ app.put("/api/questions/:questionId", authenticateToken, (req, res) => {
     }
   );
 });
+
+// CORRECTION
+
+app.post("/upload", upload.array("files"), async (req, res) => {
+  try {
+    const extractedData = [];
+
+    for (const file of req.files) {
+      const filePath = file.path;
+      const fileExt = file.mimetype.split("/")[1];
+
+      let text = "";
+      if (fileExt === "pdf") {
+        text = await extractTextFromPDF(filePath);
+      } else if (["jpeg", "jpg", "png"].includes(fileExt)) {
+        text = await extractTextFromImage(filePath);
+      }
+
+      console.log("Extracted Raw Text:", text);
+      console.log("Parsed Answers:", extractAnswers(text));
+
+      const studentInfo = extractStudentInfo(text);
+      const answers = extractAnswers(text);
+      extractedData.push({ studentInfo, answers, text });
+    }
+
+    res.json({ extractedData });
+  } catch (error) {
+    console.error("❌ ERROR:", error); // Log the error
+    res.status(500).json({ error: error.message || "Error processing files" });
+  }
+});
+
+const convertPdfToImage = async (filePath) => {
+  return new Promise((resolve, reject) => {
+    const outputPrefix = filePath.replace(".pdf", "");
+    exec(
+      `pdftoppm -png "${filePath}" "${outputPrefix}"`,
+      (error, stdout, stderr) => {
+        if (error) {
+          console.error("❌ PDF Conversion Error:", stderr);
+          return reject(new Error("Failed to convert PDF to images."));
+        }
+
+        // Check if image files were created
+        const imageFiles = fs
+          .readdirSync(path.dirname(filePath))
+          .filter(
+            (file) =>
+              file.startsWith(path.basename(filePath, ".pdf")) &&
+              file.endsWith(".png")
+          )
+          .map((file) => path.join(path.dirname(filePath), file));
+
+        if (imageFiles.length === 0) {
+          return reject(new Error("No images were generated from the PDF."));
+        }
+
+        resolve(imageFiles);
+      }
+    );
+  });
+};
+
+const extractTextFromPDF = async (filePath) => {
+  const dataBuffer = fs.readFileSync(filePath);
+  const data = await pdfParse(dataBuffer);
+
+  // If the extracted text is empty or missing answers, use OCR
+  if (data.text.trim().length < 50 || !data.text.includes("Q1")) {
+    console.log("Switching to OCR for better extraction...");
+    return await extractTextFromImage(filePath); // Use OCR as fallback
+  }
+
+  return data.text;
+};
+
+const extractTextFromImage = async (filePath) => {
+  const processedImagePath = `${filePath}-processed.png`;
+
+  // Preprocess image: Convert to grayscale, increase contrast, and remove noise
+  await sharp(filePath)
+    .grayscale() // Convert to black & white
+    .threshold(180) // Remove background noise
+    .toFile(processedImagePath);
+
+  return Tesseract.recognize(processedImagePath, "eng", {
+    logger: (m) => console.log(m),
+    tessedit_char_whitelist:
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ",
+  }).then(({ data: { text } }) => {
+    console.log("Extracted Raw Text from Image:", text);
+    return text;
+  });
+};
+
+const extractStudentInfo = (text) => {
+  // Extract full name (stop capturing at "class" keyword)
+  const fullNameMatch = text.match(
+    /Fullname:\s*_\s*\|?\s*([A-Z\s]+?)\s*(?=class:)/i
+  );
+  const classMatch = text.match(/class:\s*_([a-z0-9]+)\s*_/i);
+  const cinMatch = text.match(/emn:\.\s*([A-Z0-9]+)/i);
+
+  return {
+    fullName: fullNameMatch ? fullNameMatch[1].trim().replace(/\s+/g, " ") : "",
+    class: classMatch ? classMatch[1].trim() : "",
+    cin: cinMatch ? cinMatch[1].trim() : "",
+  };
+};
+
+const extractAnswers = (text) => {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line);
+
+  const answers = [];
+  const answerOptions = ["A", "B", "C", "D"];
+
+  lines.forEach((line) => {
+    // Match a row like "Q1   x       x"
+    const match = line.match(/^Q?(\d+)\s+([X\s]*)$/i);
+    if (match) {
+      const questionNumber = match[1];
+      const answerMarks = match[2].split(/\s+/); // Split by spaces
+
+      let selectedAnswers = [];
+      answerMarks.forEach((mark, index) => {
+        if (mark.toLowerCase() === "x" || mark === "X") {
+          selectedAnswers.push(answerOptions[index]);
+        }
+      });
+
+      answers.push({
+        question: questionNumber,
+        answer: selectedAnswers.join(", "),
+      });
+    }
+  });
+
+  return answers;
+};
 
 
 app.get("/protected", authenticateToken, (req, res) => {
