@@ -568,7 +568,7 @@ app.put("/api/questions/:questionId", authenticateToken, (req, res) => {
 });
 
 // CORRECTION
-
+/*
 app.post("/upload", upload.array("files"), async (req, res) => {
   try {
     const extractedData = [];
@@ -634,13 +634,18 @@ const extractTextFromPDF = async (filePath) => {
   const dataBuffer = fs.readFileSync(filePath);
   const data = await pdfParse(dataBuffer);
 
-  // If the extracted text is empty or missing answers, use OCR
-  if (data.text.trim().length < 50 || !data.text.includes("Q1")) {
-    console.log("Switching to OCR for better extraction...");
-    return await extractTextFromImage(filePath); // Use OCR as fallback
+  // Option 1 : Toujours utiliser l'OCR pour les formulaires à remplir manuellement
+  console.log(
+    "Using OCR for extraction because the form is expected to be handwritten..."
+  );
+  const imageFiles = await convertPdfToImage(filePath);
+  let fullText = "";
+  for (const imageFile of imageFiles) {
+    fullText += (await extractTextFromImage(imageFile)) + "\n";
   }
+  return fullText;
 
-  return data.text;
+  // Option 2 : Ajouter une condition plus fine si besoin
 };
 
 const extractTextFromImage = async (filePath) => {
@@ -661,17 +666,15 @@ const extractTextFromImage = async (filePath) => {
     return text;
   });
 };
-
-const extractStudentInfo = (text) => {
-  // Extract full name (stop capturing at "class" keyword)
-  const fullNameMatch = text.match(
-    /Fullname:\s*_\s*\|?\s*([A-Z\s]+?)\s*(?=class:)/i
-  );
-  const classMatch = text.match(/class:\s*_([a-z0-9]+)\s*_/i);
-  const cinMatch = text.match(/emn:\.\s*([A-Z0-9]+)/i);
+*/
+/*const extractStudentInfo = (text) => {
+  // On suppose que si un étudiant a écrit son nom, il remplacera les underscores par du texte.
+  const fullNameMatch = text.match(/Full name:\s*([A-Za-z\s]+)\s*/ /*i);
+  const classMatch = text.match(/Class:\s*([A-Za-z0-9\s]+)\s*/ /*i);
+  const cinMatch = text.match(/CIN:\s*([A-Z0-9\s]+)\s*/ /*i);
 
   return {
-    fullName: fullNameMatch ? fullNameMatch[1].trim().replace(/\s+/g, " ") : "",
+    fullName: fullNameMatch ? fullNameMatch[1].trim() : "",
     class: classMatch ? classMatch[1].trim() : "",
     cin: cinMatch ? cinMatch[1].trim() : "",
   };
@@ -708,8 +711,128 @@ const extractAnswers = (text) => {
   });
 
   return answers;
+};*/
+
+// Fonctions de traitement PDF
+const convertPdfToHighResImages = async (pdfPath) => {
+  const outputPrefix = path.join(__dirname, "temp", `conv_${Date.now()}`);
+  await exec(`pdftoppm -png -r 600 -aa yes "${pdfPath}" "${outputPrefix}"`);
+  return glob.sync(`${outputPrefix}-*.png`);
 };
 
+// Traitement d'image
+const preprocessImage = async (imagePath) => {
+  return sharp(imagePath)
+    .greyscale()
+    .normalize({ upper: 95, lower: 5 })
+    .linear(1.2, -0.2 * 255)
+    .sharpen({ sigma: 2, m1: 1, m2: 3 })
+    .median(5)
+    .threshold(150)
+    .toBuffer();
+};
+
+// Détection des cases à cocher
+const detectCheckboxes = async (imageBuffer) => {
+  const img = await cv.imdecode(imageBuffer);
+  const gray = img.bgrToGray();
+  const binary = gray.threshold(150, 255, cv.THRESH_BINARY);
+
+  const contours = binary.findContours(cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+
+  return contours.filter((c) => {
+    const area = c.area;
+    const rect = c.boundingRect();
+    return (
+      area > 50 &&
+      area < 1000 &&
+      rect.width / rect.height > 0.8 &&
+      rect.width / rect.height < 1.2
+    );
+  });
+};
+
+// Reconnaissance OCR
+const performOCR = async (imageBuffer) => {
+  const worker = await createWorker("fra");
+  await worker.setParameters({
+    tessedit_pageseg_mode: 6,
+    tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ",
+  });
+
+  const {
+    data: { text },
+  } = await worker.recognize(imageBuffer);
+  await worker.terminate();
+  return text;
+};
+
+// Extraction des informations étudiant
+const extractStudentInfo = (text) => {
+  const patterns = {
+    nom: /Family name:\s*([A-ZÀ-Ÿ\s]+)/i,
+    cin: /CIN:\s*([A-Z0-9]{8})/i,
+    classe: /Class:\s*([A-Z0-9\-]+)/i,
+  };
+
+  return Object.entries(patterns).reduce((acc, [key, regex]) => {
+    const match = text.match(regex);
+    acc[key] = match?.[1]?.trim() || "Non détecté";
+    return acc;
+  }, {});
+};
+
+// Traitement principal
+const processAnswerSheet = async (filePath) => {
+  try {
+    const images = await convertPdfToHighResImages(filePath);
+    const results = [];
+
+    for (const imgPath of images) {
+      const processedImage = await preprocessImage(imgPath);
+      const ocrText = await performOCR(processedImage);
+      const checkboxes = await detectCheckboxes(processedImage);
+
+      results.push({
+        studentInfo: extractStudentInfo(ocrText),
+        answers: checkboxes.map((c, i) => ({
+          question: i + 1,
+          position: c.boundingRect(),
+          checked: cv.mean(c.getPoints())[0] > 128,
+        })),
+      });
+    }
+
+    return results;
+  } catch (error) {
+    throw new Error(`Échec du traitement: ${error.message}`);
+  }
+};
+
+// Route d'upload
+app.post("/upload", upload.array("files"), async (req, res) => {
+  try {
+    if (!req.files?.length) {
+      return res.status(400).json({ error: "Aucun fichier uploadé" });
+    }
+
+    const processing = req.files.map((file) => processAnswerSheet(file.path));
+
+    const results = await Promise.all(processing);
+
+    res.json({
+      success: true,
+      processedFiles: results.length,
+      data: results.flat(),
+    });
+  } catch (error) {
+    console.error("Erreur:", error);
+    res.status(500).json({
+      error: error.message,
+      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
+    });
+  }
+});
 
 app.get("/protected", authenticateToken, (req, res) => {
   res.send("This is a protected route");
