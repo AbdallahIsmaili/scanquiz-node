@@ -1,5 +1,5 @@
 const express = require("express");
-const mysql = require("mysql2");
+const mysql = require("mysql2/promise"); // Use the promise-based API
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -19,34 +19,20 @@ const upload = multer({ dest: "uploads/" });
 app.use(cors());
 app.use(express.json());
 
-const db = mysql.createConnection({
+const db = mysql.createPool({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
 });
 
-db.connect((err) => {
-  if (err) {
-    console.error("Error connecting to the database:", err);
-    return;
-  }
-  console.log("Connected to the MySQL database");
-
-  // Test query
-  db.query("SELECT 1", (err, results) => {
-    if (err) {
-      console.error("Error executing test query:", err);
-    } else {
-      console.log("Test query successful:", results);
-    }
-  });
-});
-
 // MIDDLEWARE:
 const authenticateToken = (req, res, next) => {
   const authHeader = req.header("Authorization");
+  console.log("Authorization Header:", authHeader); // Debugging
+
   const token = authHeader && authHeader.split(" ")[1];
+  console.log("Extracted Token:", token); // Debugging
 
   if (!token) {
     console.error("Token not found");
@@ -63,7 +49,8 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// ROUTES:
+
+
 
 //auth routes
 app.post("/register", async (req, res) => {
@@ -75,139 +62,141 @@ app.post("/register", async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     // Check if the email already exists
-    db.query("SELECT * FROM Users WHERE email = ?", [email], (err, results) => {
-      if (err) {
-        console.error("Error checking email:", err);
-        return res.status(500).send("Error checking email");
+    const [results] = await db.query("SELECT * FROM Users WHERE email = ?", [
+      email,
+    ]);
+
+    if (results.length > 0) {
+      return res.status(409).send("Email already exists");
+    }
+
+    // If email does not exist, proceed with registration
+    const [insertResults] = await db.query(
+      "INSERT INTO Users (fullname, email, password) VALUES (?, ?, ?)",
+      [fullname, email, hashedPassword]
+    );
+
+    // Generate token and log in the user directly
+    const token = jwt.sign(
+      { id: insertResults.insertId, fullname, email },
+      process.env.JWT_SECRET,
+      {
+        expiresIn: "24h",
       }
+    );
 
-      if (results.length > 0) {
-        return res.status(409).send("Email already exists");
-      }
-
-      // If email does not exist, proceed with registration
-      db.query(
-        "INSERT INTO Users (fullname, email, password) VALUES (?, ?, ?)",
-        [fullname, email, hashedPassword],
-        (err, results) => {
-          if (err) {
-            console.error("Error registering user:", err);
-            return res.status(500).send("Error registering user");
-          }
-
-          // Generate token and log in the user directly
-          const token = jwt.sign(
-            { id: results.insertId, fullname, email },
-            process.env.JWT_SECRET,
-            {
-              expiresIn: "24h",
-            }
-          );
-
-          res.json({ token });
-        }
-      );
-    });
+    res.json({ token });
   } catch (error) {
-    console.error("Error hashing password:", error);
-    res.status(500).send("Error hashing password");
+    console.error("Error registering user:", error);
+    res.status(500).send("Error registering user");
   }
 });
 
-app.post("/login", (req, res) => {
+app.post("/login", async (req, res) => {
   const { email, password } = req.body;
 
-  db.query(
-    "SELECT * FROM Users WHERE email = ?",
-    [email],
-    async (err, results) => {
-      if (err || results.length === 0) {
-        return res.status(401).send("User not found");
-      }
+  try {
+    const [results] = await db.query("SELECT * FROM Users WHERE email = ?", [
+      email,
+    ]);
 
-      const user = results[0];
-      const isMatch = await bcrypt.compare(password, user.password);
-
-      if (!isMatch) {
-        return res.status(401).send("Incorrect password");
-      }
-
-      const token = jwt.sign(
-        { id: user.id, fullname: user.fullname, email: user.email },
-        process.env.JWT_SECRET,
-        {
-          expiresIn: "24h",
-        }
-      );
-
-      res.json({ token });
+    if (results.length === 0) {
+      return res.status(401).send("User not found");
     }
-  );
+
+    const user = results[0];
+    const isMatch = await bcrypt.compare(password, user.password);
+
+    if (!isMatch) {
+      return res.status(401).send("Incorrect password");
+    }
+
+    const token = jwt.sign(
+      { id: user.id, fullname: user.fullname, email: user.email },
+      process.env.JWT_SECRET,
+      {
+        expiresIn: "24h",
+      }
+    );
+
+    res.json({ token });
+  } catch (error) {
+    console.error("Error logging in user:", error);
+    res.status(500).send("Error logging in user");
+  }
 });
+
 
 //quiz routes
-app.post("/save-quiz", authenticateToken, (req, res) => {
-  const { title, questions } = req.body;
+app.post("/save-quiz", authenticateToken, async (req, res) => {
+  const { title, questions, exam_id } = req.body;
   const userId = req.user.id;
 
-  db.query(
-    "INSERT INTO Quizzes (title, user_id) VALUES (?, ?)",
-    [title, userId],
-    (err, result) => {
-      if (err) {
-        console.error("Error saving quiz:", err);
-        return res.status(500).send("Error saving quiz");
-      }
+  console.log("Received exam_id:", exam_id);
 
-      const quizId = result.insertId;
+  if (!exam_id) {
+    console.error("❌ Exam ID is missing!");
+    return res.status(400).send("Exam ID is required");
+  }
 
-      questions.forEach((question, questionIndex) => {
-        db.query(
-          "INSERT INTO Questions (quiz_id, question_text, question_type, box_size) VALUES (?, ?, ?, ?)",
-          [quizId, question.text, question.type, question.boxSize || null],
-          (err, questionResult) => {
-            if (err) {
-              console.error(`Error saving question ${questionIndex + 1}:`, err);
-              return res
-                .status(500)
-                .send(`Error saving question ${questionIndex + 1}`);
-            }
+  try {
+    // Check if quiz already exists
+    const [quizResults] = await db.query(
+      "SELECT id FROM Quizzes WHERE title = ? AND user_id = ?",
+      [title, userId]
+    );
 
-            const questionId = questionResult.insertId;
-
-            if (question.type === "multiple-choice" && question.choices) {
-              question.choices.forEach((choice, choiceIndex) => {
-                db.query(
-                  "INSERT INTO Choices (question_id, choice_text, is_correct) VALUES (?, ?, ?)",
-                  [questionId, choice.text, choice.isCorrect],
-                  (err) => {
-                    if (err) {
-                      console.error(
-                        `Error saving choice ${choiceIndex + 1} for question ${
-                          questionIndex + 1
-                        }:`,
-                        err
-                      );
-                      return res
-                        .status(500)
-                        .send(
-                          `Error saving choice ${
-                            choiceIndex + 1
-                          } for question ${questionIndex + 1}`
-                        );
-                    }
-                  }
-                );
-              });
-            }
-          }
-        );
-      });
-
-      res.status(201).send("Quiz saved successfully");
+    if (quizResults.length > 0) {
+      // Quiz exists -> Update exam_id
+      await db.query(
+        "UPDATE Quizzes SET exam_id = ? WHERE title = ? AND user_id = ?",
+        [exam_id, title, userId]
+      );
+      console.log("✅ Updated exam_id:", exam_id);
+    } else {
+      // Quiz does not exist -> Insert new quiz
+      const [insertResults] = await db.query(
+        "INSERT INTO Quizzes (title, user_id, exam_id) VALUES (?, ?, ?)",
+        [title, userId, exam_id]
+      );
+      console.log("✅ New quiz inserted with exam_id:", exam_id);
     }
-  );
+
+    // Fetch the quiz ID
+    const [updatedQuizResults] = await db.query(
+      "SELECT id FROM Quizzes WHERE title = ? AND user_id = ?",
+      [title, userId]
+    );
+    const quizId = updatedQuizResults[0].id;
+
+    // Insert questions
+    for (const question of questions) {
+      const { question_text, question_type, box_size } = question;
+      const [questionResults] = await db.query(
+        "INSERT INTO Questions (quiz_id, question_text, question_type, box_size) VALUES (?, ?, ?, ?)",
+        [quizId, question_text, question_type, box_size]
+      );
+      console.log("✅ Question inserted with ID:", questionResults.insertId);
+
+      // Insert choices
+      const questionId = questionResults.insertId;
+      for (const choice of question.choices) {
+        const { choice_text, is_correct } = choice;
+        await db.query(
+          "INSERT INTO Choices (question_id, choice_text, is_correct) VALUES (?, ?, ?)",
+          [questionId, choice_text, is_correct]
+        );
+        console.log("✅ Choice inserted for question ID:", questionId);
+      }
+    }
+
+    res.status(201).json({ message: "Quiz saved successfully", exam_id });
+  } catch (error) {
+    console.error("❌ Error saving quiz:", error);
+    res.status(500).send("Error saving quiz");
+  }
 });
+
 
 // Route to get quizzes
 app.get("/api/quizzes", authenticateToken, (req, res) => {
@@ -395,7 +384,8 @@ app.get("/api/quizzes/:quizId/questions", authenticateToken, (req, res) => {
   });
 });
 
-// questions routes
+
+
 app.get("/api/questions/:questionId", authenticateToken, (req, res) => {
   const { questionId } = req.params;
 
@@ -710,6 +700,213 @@ const extractAnswers = (text) => {
   return answers;
 };
 
+
+app.get("/api/exam-info/:exam_id", async (req, res) => {
+  const examId = req.params.exam_id;
+
+  try {
+    // Fetch exam details
+    const [examDetails] = await db.query(
+      "SELECT * FROM quizzes WHERE exam_id = ?",
+      [examId]
+    );
+    console.log("Exam Details: ", examDetails);
+
+    if (examDetails.length === 0) {
+      return res.status(404).json({ message: "Exam not found" });
+    }
+
+    // Fetch questions related to the quiz
+    const [questions] = await db.query(
+      "SELECT * FROM questions WHERE quiz_id = ?",
+      [examDetails[0].id]
+    );
+    console.log("Questions: ", questions);
+
+    let choices = [];
+    if (questions.length > 0) {
+      // Fetch choices for each question
+      const questionIds = questions.map((q) => q.id);
+      [choices] = await db.query(
+        "SELECT * FROM choices WHERE question_id IN (?)",
+        [questionIds]
+      );
+      console.log("Choices: ", choices);
+    }
+
+    // Organize data into a structured format
+    const examData = {
+      exam_info: examDetails[0],
+      questions: questions.map((question) => ({
+        ...question,
+        choices: choices.filter((choice) => choice.question_id === question.id),
+      })),
+    };
+
+    res.json(examData);
+  } catch (error) {
+    console.error("Error fetching exam data:", error);
+    res.status(500).json({ message: "Failed to fetch exam data" });
+  }
+});
+
+
+app.get("/api/exam/:examId", async (req, res) => {
+  const { examId } = req.params;
+  const { maxScore } = req.query; // Get maxScore from query params
+
+  try {
+    // Fetch exam title from the quizzes table
+    const [examInfo] = await db.query(
+      `SELECT title FROM quizzes WHERE exam_id = ?`,
+      [examId]
+    );
+
+    if (!examInfo.length) {
+      return res.status(404).json({ message: "Exam not found" });
+    }
+
+    // Fetch questions for the quiz
+    const [questions] = await db.query(
+      `SELECT id, question_text FROM questions WHERE quiz_id = ?`,
+      [examId]
+    );
+
+    // Fetch student results for the exam
+    const [studentResults] = await db.query(
+      `SELECT id, name, cin, class, score FROM studentresults WHERE exam_id = ?`,
+      [examId]
+    );
+
+    // Fetch student answers for the exam
+    const [studentAnswers] = await db.query(
+      `SELECT student_id, question, chosen_options, is_correct, correct_answers 
+       FROM studentanswers 
+       WHERE exam_id = ?`,
+      [examId]
+    );
+
+    // Combine student results and answers
+    const students = studentResults.map((student) => {
+      const answers = studentAnswers
+        .filter((answer) => answer.student_id === student.id)
+        .map((answer) => ({
+          question: answer.question,
+          selectedChoices: answer.chosen_options.split(", "),
+          isCorrect: answer.is_correct === 1,
+          correctAnswers: answer.correct_answers.split(", "),
+        }));
+
+      return {
+        student_info: {
+          Name: student.name,
+          CIN: student.cin,
+          Class: student.class,
+        },
+        score: student.score,
+        answers: answers,
+      };
+    });
+
+    res.json({
+      exam_info: {
+        title: examInfo[0].title,
+        exam_id: examId,
+        max_score: maxScore || 20, // Use maxScore from query or default to 20
+      },
+      questions: questions, // Include questions in the response
+      students: students,
+    });
+  } catch (error) {
+    console.error("Error fetching exam data:", error);
+    res.status(500).json({ message: "Failed to fetch exam data" });
+  }
+});
+
+
+app.post("/api/save-results", async (req, res) => {
+  const { examId, students } = req.body;
+
+  if (!examId || !students.length) {
+    return res.status(400).json({ message: "Invalid data provided" });
+  }
+
+  try {
+    // Prepare student results for insertion or update
+    const studentValues = students.map((student) => [
+      student.student_info?.Name || "Unknown",
+      student.student_info?.CIN || "N/A",
+      student.student_info?.Class || "N/A",
+      examId,
+      student.score,
+    ]);
+
+    // Insert or update student results
+    const studentSql = `
+      INSERT INTO StudentResults (name, cin, class, exam_id, score) 
+      VALUES ?
+      ON DUPLICATE KEY UPDATE score = VALUES(score)
+    `;
+    await db.query(studentSql, [studentValues]);
+
+    // Fetch all student IDs for the current exam
+    const [studentIds] = await db.query(
+      `SELECT id, name, cin, class 
+       FROM StudentResults 
+       WHERE exam_id = ?`,
+      [examId]
+    );
+
+    // Create a map of student IDs for quick lookup
+    const studentIdMap = new Map();
+    studentIds.forEach((student) => {
+      const key = `${student.name}-${student.cin}-${student.class}`;
+      studentIdMap.set(key, student.id);
+    });
+
+    // Prepare student answers for insertion
+    const answerValues = [];
+    students.forEach((student) => {
+      const key = `${student.student_info?.Name || "Unknown"}-${
+        student.student_info?.CIN || "N/A"
+      }-${student.student_info?.Class || "N/A"}`;
+      const studentId = studentIdMap.get(key);
+
+      if (studentId) {
+        student.answers.forEach((answer) => {
+          answerValues.push([
+            studentId, // Student ID
+            examId,
+            answer.question,
+            answer.selectedChoices.join(", "), // Chosen options
+            answer.isCorrect ? 1 : 0, // Mark as correct or incorrect
+            answer.correctAnswers.join(", "), // Correct options
+          ]);
+        });
+      }
+    });
+
+    // Insert student answers
+    if (answerValues.length > 0) {
+      const answerSql = `
+        INSERT INTO StudentAnswers (student_id, exam_id, question, chosen_options, is_correct, correct_answers) 
+        VALUES ?
+        ON DUPLICATE KEY UPDATE 
+          chosen_options = VALUES(chosen_options),
+          is_correct = VALUES(is_correct),
+          correct_answers = VALUES(correct_answers)
+      `;
+      await db.query(answerSql, [answerValues]);
+    }
+
+    res.json({
+      message: "Results and answers saved or updated successfully",
+    });
+  } catch (error) {
+    console.error("Error saving results:", error);
+    res.status(500).json({ message: "Failed to save results" });
+  }
+});
 
 app.get("/protected", authenticateToken, (req, res) => {
   res.send("This is a protected route");
