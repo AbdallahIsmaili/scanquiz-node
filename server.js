@@ -16,6 +16,7 @@ const app = express();
 const port = process.env.PORT || 3001;
 const upload = multer({ dest: "uploads/" });
 
+
 app.use(cors());
 app.use(express.json());
 
@@ -199,362 +200,289 @@ app.post("/save-quiz", authenticateToken, async (req, res) => {
 
 
 // Route to get quizzes
-app.get("/api/quizzes", authenticateToken, (req, res) => {
+app.get("/api/quizzes", authenticateToken, async (req, res) => {
   const userId = req.user.id; // assuming userId is set in authenticateToken middleware
-  db.query(
-    "SELECT * FROM Quizzes WHERE user_id = ?",
-    [userId],
-    (err, results) => {
-      if (err) {
-        console.error("Error fetching quizzes:", err);
-        return res.status(500).send("Error fetching quizzes");
-      }
-      res.json(results);
-    }
-  );
+  console.log("User ID:", userId);
+
+  try {
+    const [results] = await db.query(
+      "SELECT * FROM Quizzes WHERE user_id = ?",
+      [userId]
+    );
+
+    console.log("Quizzes fetched:", results); // Log the results
+    res.json(results); // Send the quizzes as a JSON response
+  } catch (err) {
+    console.error("Error fetching quizzes:", err);
+    res.status(500).send("Error fetching quizzes");
+  }
 });
 
-app.delete("/api/quizzes/:quizId", authenticateToken, (req, res) => {
+
+app.delete("/api/quizzes/:quizId", authenticateToken, async (req, res) => {
   const { quizId } = req.params;
 
-  // First, delete all choices related to questions in this quiz
-  db.query(
-    "DELETE FROM Choices WHERE question_id IN (SELECT id FROM Questions WHERE quiz_id = ?)",
-    [quizId],
-    (err) => {
-      if (err) {
-        console.error("Error deleting choices:", err);
-        return res.status(500).json({ error: "Error deleting choices" });
-      }
+  try {
+    // First, delete all choices related to questions in this quiz
+    await db.query(
+      "DELETE FROM Choices WHERE question_id IN (SELECT id FROM Questions WHERE quiz_id = ?)",
+      [quizId]
+    );
 
-      // Then, delete all questions related to this quiz
-      db.query("DELETE FROM Questions WHERE quiz_id = ?", [quizId], (err) => {
-        if (err) {
-          console.error("Error deleting questions:", err);
-          return res.status(500).json({ error: "Error deleting questions" });
-        }
+    // Then, delete all questions related to this quiz
+    await db.query("DELETE FROM Questions WHERE quiz_id = ?", [quizId]);
 
-        // Finally, delete the quiz itself
-        db.query("DELETE FROM Quizzes WHERE id = ?", [quizId], (err) => {
-          if (err) {
-            console.error("Error deleting quiz:", err);
-            return res.status(500).json({ error: "Error deleting quiz" });
-          }
+    // Finally, delete the quiz itself
+    await db.query("DELETE FROM Quizzes WHERE id = ?", [quizId]);
 
-          res.json({ message: "Quiz deleted successfully" });
-        });
-      });
-    }
-  );
+    res.json({ message: "Quiz deleted successfully" });
+  } catch (err) {
+    console.error("Error deleting quiz:", err);
+    res.status(500).json({ error: "Error deleting quiz" });
+  }
 });
 
-app.put("/api/quizzes/:quizId", authenticateToken, (req, res) => {
+app.put("/api/quizzes/:quizId", authenticateToken, async (req, res) => {
   const { quizId } = req.params;
   const { title, newQuestion } = req.body;
 
   console.log(`Updating quiz ${quizId} with title '${title}'`);
 
-  // First, update the quiz title
-  db.query(
-    "UPDATE Quizzes SET title = ? WHERE id = ?",
-    [title, quizId],
-    (err) => {
-      if (err) {
-        console.error("Error updating quiz title:", err);
-        return res.status(500).json({ error: "Error updating quiz title" });
+  try {
+    // First, update the quiz title
+    await db.query("UPDATE Quizzes SET title = ? WHERE id = ?", [
+      title,
+      quizId,
+    ]);
+    console.log(`Quiz title updated to '${title}'`);
+
+    // If there's a new question, check for duplicates before adding
+    if (newQuestion) {
+      console.log(
+        `Checking for duplicate question '${newQuestion}' in quiz ${quizId}`
+      );
+
+      const [results] = await db.query(
+        "SELECT * FROM Questions WHERE quiz_id = ? AND question_text = ?",
+        [quizId, newQuestion]
+      );
+
+      if (results.length > 0) {
+        console.log(`Duplicate question found: '${newQuestion}'`);
+        return res.status(400).json({
+          error: "A question with the same text already exists in this quiz",
+        });
       }
 
-      console.log(`Quiz title updated to '${title}'`);
+      console.log(
+        `No duplicate question found, adding new question '${newQuestion}'`
+      );
 
-      // If there's a new question, check for duplicates before adding
-      if (newQuestion) {
-        console.log(
-          `Checking for duplicate question '${newQuestion}' in quiz ${quizId}`
-        );
-        db.query(
-          "SELECT * FROM Questions WHERE quiz_id = ? AND question_text = ?",
-          [quizId, newQuestion],
-          (err, results) => {
-            if (err) {
-              console.error("Error checking for duplicate question:", err);
-              return res
-                .status(500)
-                .json({ error: "Error checking for duplicate question" });
-            }
+      // If no duplicates, add the new question
+      await db.query(
+        "INSERT INTO Questions (quiz_id, question_text, question_type) VALUES (?, ?, ?)",
+        [quizId, newQuestion, "multiple-choice"]
+      );
 
-            if (results.length > 0) {
-              console.log(`Duplicate question found: '${newQuestion}'`);
-              return res.status(400).json({
-                error:
-                  "A question with the same text already exists in this quiz",
-              });
-            }
-
-            console.log(
-              `No duplicate question found, adding new question '${newQuestion}'`
-            );
-            // If no duplicates, add the new question
-            db.query(
-              "INSERT INTO Questions (quiz_id, question_text, question_type) VALUES (?, ?, ?)",
-              [quizId, newQuestion, "multiple-choice"],
-              (err) => {
-                if (err) {
-                  console.error("Error adding new question:", err);
-                  return res
-                    .status(500)
-                    .json({ error: "Error adding new question" });
-                }
-
-                console.log(`New question '${newQuestion}' added successfully`);
-                res.json({
-                  message: "Quiz updated successfully with new question",
-                });
-              }
-            );
-          }
-        );
-      } else {
-        res.json({ message: "Quiz updated successfully" });
-      }
+      console.log(`New question '${newQuestion}' added successfully`);
+      res.json({
+        message: "Quiz updated successfully with new question",
+      });
+    } else {
+      res.json({ message: "Quiz updated successfully" });
     }
-  );
+  } catch (err) {
+    console.error("Error updating quiz:", err);
+    res.status(500).json({ error: "Error updating quiz" });
+  }
 });
 
-app.get("/api/quizzes/:quizId", authenticateToken, (req, res) => {
+app.get("/api/quizzes/:quizId", authenticateToken, async (req, res) => {
   const { quizId } = req.params;
 
-  db.query(
-    "SELECT title FROM Quizzes WHERE id = ?",
-    [quizId],
-    (err, results) => {
-      if (err) {
-        console.error("Error fetching quiz details:", err);
-        return res.status(500).json({ error: "Error fetching quiz details" });
-      }
+  try {
+    const [results] = await db.query("SELECT title FROM Quizzes WHERE id = ?", [
+      quizId,
+    ]);
+
+    if (results.length === 0) {
+      return res.status(404).json({ error: "Quiz not found" });
+    }
+
+    res.json(results[0]);
+  } catch (err) {
+    console.error("Error fetching quiz details:", err);
+    res.status(500).json({ error: "Error fetching quiz details" });
+  }
+});
+
+app.get("/api/quizzes/:quizId/questions", authenticateToken, async (req, res) => {
+    const { quizId } = req.params;
+    console.log("Fetching questions for quiz ID:", quizId);
+
+    try {
+      const query = `
+      SELECT q.id AS question_id, q.question_text, q.question_type, q.box_size,
+             c.id AS choice_id, c.choice_text, c.is_correct
+      FROM Questions q
+      LEFT JOIN Choices c ON q.id = c.question_id
+      WHERE q.quiz_id = ?`;
+
+      const [results] = await db.query(query, [quizId]);
+      console.log("Query results:", results);
 
       if (results.length === 0) {
-        return res.status(404).json({ error: "Quiz not found" });
+        return res.json([]); // Return an empty array if no questions are found
       }
 
-      res.json(results[0]);
-    }
-  );
-});
+      const questionsMap = new Map();
 
-app.get("/api/quizzes/:quizId/questions", authenticateToken, (req, res) => {
-  const { quizId } = req.params;
-
-  const query = `
-    SELECT q.id AS question_id, q.question_text, q.question_type, q.box_size,
-           c.id AS choice_id, c.choice_text, c.is_correct
-    FROM Questions q
-    LEFT JOIN Choices c ON q.id = c.question_id
-    WHERE q.quiz_id = ?`;
-
-  db.query(query, [quizId], (err, results) => {
-    if (err) {
-      console.error("Error fetching questions:", err);
-      return res.status(500).send("Error fetching questions");
-    }
-
-    // Structure the response correctly
-    const questionsMap = new Map();
-
-    results.forEach((row) => {
-      if (!questionsMap.has(row.question_id)) {
-        questionsMap.set(row.question_id, {
-          id: row.question_id,
-          question_text: row.question_text,
-          question_type: row.question_type,
-          box_size: row.box_size,
-          choices: [],
-        });
-      }
-
-      if (row.choice_id) {
-        questionsMap.get(row.question_id).choices.push({
-          id: row.choice_id,
-          choice_text: row.choice_text,
-          is_correct: row.is_correct,
-        });
-      }
-    });
-
-    res.json([...questionsMap.values()]);
-  });
-});
-
-
-
-app.get("/api/questions/:questionId", authenticateToken, (req, res) => {
-  const { questionId } = req.params;
-
-  db.query(
-    "SELECT * FROM Questions WHERE id = ?",
-    [questionId],
-    (err, questionResults) => {
-      if (err) {
-        console.error("Error fetching question details:", err);
-        return res.status(500).send("Error fetching question details");
-      }
-
-      if (questionResults.length === 0) {
-        return res.status(404).send("Question not found");
-      }
-
-      const question = questionResults[0];
-
-      db.query(
-        "SELECT * FROM Choices WHERE question_id = ?",
-        [questionId],
-        (err, choiceResults) => {
-          if (err) {
-            console.error("Error fetching choices:", err);
-            return res.status(500).send("Error fetching choices");
-          }
-
-          question.choices = choiceResults;
-          res.json(question);
+      results.forEach((row) => {
+        if (!questionsMap.has(row.question_id)) {
+          questionsMap.set(row.question_id, {
+            id: row.question_id,
+            question_text: row.question_text,
+            question_type: row.question_type,
+            box_size: row.box_size,
+            choices: [],
+          });
         }
-      );
-    }
-  );
-});
 
-app.delete("/api/questions/:questionId", authenticateToken, (req, res) => {
+        if (row.choice_id) {
+          questionsMap.get(row.question_id).choices.push({
+            id: row.choice_id,
+            choice_text: row.choice_text,
+            is_correct: row.is_correct,
+          });
+        }
+      });
+
+      const formattedQuestions = [...questionsMap.values()];
+      console.log("Formatted questions:", formattedQuestions);
+      res.json(formattedQuestions);
+    } catch (err) {
+      console.error("Error fetching questions:", err);
+      res.status(500).send("Error fetching questions");
+    }
+  }
+);
+
+
+
+app.get("/api/questions/:questionId", authenticateToken, async (req, res) => {
   const { questionId } = req.params;
 
-  // First, delete all choices related to this question
-  db.query("DELETE FROM Choices WHERE question_id = ?", [questionId], (err) => {
-    if (err) {
-      console.error("Error deleting choices:", err);
-      return res.status(500).json({ error: "Error deleting choices" });
+  try {
+    // Fetch the question details
+    const [questionResults] = await db.query(
+      "SELECT * FROM Questions WHERE id = ?",
+      [questionId]
+    );
+
+    if (questionResults.length === 0) {
+      return res.status(404).send("Question not found");
     }
 
-    // Then, delete the question itself
-    db.query("DELETE FROM Questions WHERE id = ?", [questionId], (err) => {
-      if (err) {
-        console.error("Error deleting question:", err);
-        return res.status(500).json({ error: "Error deleting question" });
-      }
+    const question = questionResults[0];
+
+    // Fetch the choices for the question
+    const [choiceResults] = await db.query(
+      "SELECT * FROM Choices WHERE question_id = ?",
+      [questionId]
+    );
+
+    question.choices = choiceResults;
+    res.json(question);
+  } catch (err) {
+    console.error("Error fetching question details:", err);
+    res.status(500).send("Error fetching question details");
+  }
+});
+
+app.delete( "/api/questions/:questionId", authenticateToken, async (req, res) => {
+    const { questionId } = req.params;
+
+    try {
+      // First, delete all choices related to this question
+      await db.query("DELETE FROM Choices WHERE question_id = ?", [questionId]);
+
+      // Then, delete the question itself
+      await db.query("DELETE FROM Questions WHERE id = ?", [questionId]);
 
       res.json({ message: "Question deleted successfully" });
-    });
-  });
-});
+    } catch (err) {
+      console.error("Error deleting question:", err);
+      res.status(500).json({ error: "Error deleting question" });
+    }
+  }
+);
 
-app.put("/api/questions/:questionId", authenticateToken, (req, res) => {
+app.put("/api/questions/:questionId", authenticateToken, async (req, res) => {
   const { questionId } = req.params;
   const { question_text, question_type, box_size, choices } = req.body;
 
   console.log("Received data:", req.body);
 
-  // Check for duplicate question text
-  db.query(
-    "SELECT * FROM Questions WHERE question_text = ? AND id != ? AND quiz_id = (SELECT quiz_id FROM Questions WHERE id = ?)",
-    [question_text, questionId, questionId],
-    (err, results) => {
-      if (err) {
-        console.error("Error checking for duplicate question text:", err);
-        return res
-          .status(500)
-          .json({ error: "Error checking for duplicate question text" });
-      }
+  try {
+    // Check for duplicate question text
+    const [duplicateResults] = await db.query(
+      "SELECT * FROM Questions WHERE question_text = ? AND id != ? AND quiz_id = (SELECT quiz_id FROM Questions WHERE id = ?)",
+      [question_text, questionId, questionId]
+    );
 
-      if (results.length > 0) {
-        return res.status(400).json({ error: "Duplicate question text found" });
-      }
-
-      // Check for duplicate answers within the same question
-      if (question_type === "multiple-choice" && Array.isArray(choices)) {
-        const uniqueChoices = new Set(
-          choices.map((choice) => choice.choice_text)
-        );
-        if (uniqueChoices.size !== choices.length) {
-          return res.status(400).json({
-            error: "Duplicate answers are not allowed within the same question",
-          });
-        }
-      }
-
-      // Update the main question details
-      db.query(
-        "UPDATE Questions SET question_text = ?, question_type = ?, box_size = ? WHERE id = ?",
-        [question_text, question_type, box_size || null, questionId],
-        (err) => {
-          if (err) {
-            console.error("Error updating question details:", err);
-            return res
-              .status(500)
-              .json({ error: "Error updating question details" });
-          }
-
-          console.log("Question details updated");
-
-          // If the question is multiple-choice, update choices
-          if (question_type === "multiple-choice" && Array.isArray(choices)) {
-            db.query(
-              "DELETE FROM Choices WHERE question_id = ?",
-              [questionId],
-              (err) => {
-                if (err) {
-                  console.error("Error deleting existing choices:", err);
-                  return res
-                    .status(500)
-                    .json({ error: "Error updating choices" });
-                }
-
-                console.log("Existing choices deleted");
-
-                const choiceInserts = choices.map((choice) => [
-                  questionId,
-                  choice.choice_text,
-                  choice.is_correct,
-                ]);
-
-                db.query(
-                  "INSERT INTO Choices (question_id, choice_text, is_correct) VALUES ?",
-                  [choiceInserts],
-                  (err) => {
-                    if (err) {
-                      console.error("Error inserting new choices:", err);
-                      return res
-                        .status(500)
-                        .json({ error: "Error updating choices" });
-                    }
-
-                    console.log("New choices inserted");
-                    res.json({
-                      message: "Question and choices updated successfully",
-                    });
-                  }
-                );
-              }
-            );
-          } else {
-            db.query(
-              "DELETE FROM Choices WHERE question_id = ?",
-              [questionId],
-              (err) => {
-                if (err) {
-                  console.error(
-                    "Error clearing choices for non-multiple-choice question:",
-                    err
-                  );
-                  return res
-                    .status(500)
-                    .json({ error: "Error clearing choices" });
-                }
-
-                console.log("Choices cleared for non-multiple-choice question");
-                res.json({ message: "Question updated successfully" });
-              }
-            );
-          }
-        }
-      );
+    if (duplicateResults.length > 0) {
+      return res.status(400).json({ error: "Duplicate question text found" });
     }
-  );
+
+    // Check for duplicate answers within the same question
+    if (question_type === "multiple-choice" && Array.isArray(choices)) {
+      const uniqueChoices = new Set(
+        choices.map((choice) => choice.choice_text)
+      );
+      if (uniqueChoices.size !== choices.length) {
+        return res.status(400).json({
+          error: "Duplicate answers are not allowed within the same question",
+        });
+      }
+    }
+
+    // Update the main question details
+    await db.query(
+      "UPDATE Questions SET question_text = ?, question_type = ?, box_size = ? WHERE id = ?",
+      [question_text, question_type, box_size || null, questionId]
+    );
+
+    console.log("Question details updated");
+
+    // If the question is multiple-choice, update choices
+    if (question_type === "multiple-choice" && Array.isArray(choices)) {
+      await db.query("DELETE FROM Choices WHERE question_id = ?", [questionId]);
+      console.log("Existing choices deleted");
+
+      const choiceInserts = choices.map((choice) => [
+        questionId,
+        choice.choice_text,
+        choice.is_correct,
+      ]);
+
+      await db.query(
+        "INSERT INTO Choices (question_id, choice_text, is_correct) VALUES ?",
+        [choiceInserts]
+      );
+
+      console.log("New choices inserted");
+      res.json({
+        message: "Question and choices updated successfully",
+      });
+    } else {
+      await db.query("DELETE FROM Choices WHERE question_id = ?", [questionId]);
+      console.log("Choices cleared for non-multiple-choice question");
+      res.json({ message: "Question updated successfully" });
+    }
+  } catch (err) {
+    console.error("Error updating question:", err);
+    res.status(500).json({ error: "Error updating question" });
+  }
 });
 
 // CORRECTION
