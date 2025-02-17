@@ -796,6 +796,60 @@ app.post("/api/save-results", async (req, res) => {
   }
 });
 
+
+app.get("/api/most-difficult-questions/:examId", async (req, res) => {
+  const { examId } = req.params;
+
+  try {
+    const [results] = await db.query(
+      `
+      SELECT sa.question, COUNT(*) AS incorrect_count
+      FROM StudentAnswers sa
+      JOIN StudentResults sr ON sa.student_id = sr.id
+      WHERE sa.exam_id = ? AND sa.is_correct = 0
+      GROUP BY sa.question
+      ORDER BY incorrect_count DESC
+      LIMIT 5;
+      `,
+      [examId]
+    );
+
+    res.json(results);
+  } catch (error) {
+    console.error("Error fetching most difficult questions:", error);
+    res.status(500).json({ message: "Failed to fetch difficult questions" });
+  }
+});
+
+
+app.get("/api/correct-incorrect/:examId", async (req, res) => {
+  const { examId } = req.params;
+
+  try {
+    const [results] = await db.query(
+      `
+      SELECT 
+        SUM(CASE WHEN sa.is_correct = 1 THEN 1 ELSE 0 END) AS total_correct,
+        SUM(CASE WHEN sa.is_correct = 0 THEN 1 ELSE 0 END) AS total_incorrect
+      FROM StudentAnswers sa
+      WHERE sa.exam_id = ?;
+      `,
+      [examId]
+    );
+
+    if (!results || results.length === 0) {
+      return res.json({ total_correct: 0, total_incorrect: 0 });
+    }
+
+    res.json(results[0]);
+  } catch (error) {
+    console.error("Error fetching correct/incorrect counts:", error);
+    res.status(500).json({ message: "Failed to fetch data" });
+  }
+});
+
+
+
 app.get("/protected", authenticateToken, (req, res) => {
   res.send("This is a protected route");
 });
