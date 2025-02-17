@@ -30,20 +30,19 @@ const db = mysql.createPool({
 // MIDDLEWARE:
 const authenticateToken = (req, res, next) => {
   const authHeader = req.header("Authorization");
-  console.log("Authorization Header:", authHeader); // Debugging
+  console.log("Authorization Header:", authHeader); 
 
   const token = authHeader && authHeader.split(" ")[1];
-  console.log("Extracted Token:", token); // Debugging
 
   if (!token) {
     console.error("Token not found");
-    return res.sendStatus(401); // Unauthorized
+    return res.sendStatus(401); 
   }
 
   jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
     if (err) {
       console.error("Token verification failed:", err);
-      return res.sendStatus(403); // Forbidden
+      return res.sendStatus(403); 
     }
     req.user = user;
     next();
@@ -62,7 +61,6 @@ app.post("/register", async (req, res) => {
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Check if the email already exists
     const [results] = await db.query("SELECT * FROM Users WHERE email = ?", [
       email,
     ]);
@@ -71,13 +69,11 @@ app.post("/register", async (req, res) => {
       return res.status(409).send("Email already exists");
     }
 
-    // If email does not exist, proceed with registration
     const [insertResults] = await db.query(
       "INSERT INTO Users (fullname, email, password) VALUES (?, ?, ?)",
       [fullname, email, hashedPassword]
     );
 
-    // Generate token and log in the user directly
     const token = jwt.sign(
       { id: insertResults.insertId, fullname, email },
       process.env.JWT_SECRET,
@@ -141,21 +137,18 @@ app.post("/save-quiz", authenticateToken, async (req, res) => {
   }
 
   try {
-    // Check if quiz already exists
     const [quizResults] = await db.query(
       "SELECT id FROM Quizzes WHERE title = ? AND user_id = ?",
       [title, userId]
     );
 
     if (quizResults.length > 0) {
-      // Quiz exists -> Update exam_id
       await db.query(
         "UPDATE Quizzes SET exam_id = ? WHERE title = ? AND user_id = ?",
         [exam_id, title, userId]
       );
       console.log("✅ Updated exam_id:", exam_id);
     } else {
-      // Quiz does not exist -> Insert new quiz
       const [insertResults] = await db.query(
         "INSERT INTO Quizzes (title, user_id, exam_id) VALUES (?, ?, ?)",
         [title, userId, exam_id]
@@ -163,23 +156,19 @@ app.post("/save-quiz", authenticateToken, async (req, res) => {
       console.log("✅ New quiz inserted with exam_id:", exam_id);
     }
 
-    // Fetch the quiz ID
     const [updatedQuizResults] = await db.query(
       "SELECT id FROM Quizzes WHERE title = ? AND user_id = ?",
       [title, userId]
     );
     const quizId = updatedQuizResults[0].id;
 
-    // Insert questions
     for (const question of questions) {
       const { question_text, question_type, box_size } = question;
       const [questionResults] = await db.query(
         "INSERT INTO Questions (quiz_id, question_text, question_type, box_size) VALUES (?, ?, ?, ?)",
         [quizId, question_text, question_type, box_size]
       );
-      console.log("✅ Question inserted with ID:", questionResults.insertId);
-
-      // Insert choices
+      
       const questionId = questionResults.insertId;
       for (const choice of question.choices) {
         const { choice_text, is_correct } = choice;
@@ -187,7 +176,6 @@ app.post("/save-quiz", authenticateToken, async (req, res) => {
           "INSERT INTO Choices (question_id, choice_text, is_correct) VALUES (?, ?, ?)",
           [questionId, choice_text, is_correct]
         );
-        console.log("✅ Choice inserted for question ID:", questionId);
       }
     }
 
@@ -201,7 +189,7 @@ app.post("/save-quiz", authenticateToken, async (req, res) => {
 
 // Route to get quizzes
 app.get("/api/quizzes", authenticateToken, async (req, res) => {
-  const userId = req.user.id; // assuming userId is set in authenticateToken middleware
+  const userId = req.user.id; 
   console.log("User ID:", userId);
 
   try {
@@ -210,8 +198,8 @@ app.get("/api/quizzes", authenticateToken, async (req, res) => {
       [userId]
     );
 
-    console.log("Quizzes fetched:", results); // Log the results
-    res.json(results); // Send the quizzes as a JSON response
+    console.log("Quizzes fetched:", results); 
+    res.json(results); 
   } catch (err) {
     console.error("Error fetching quizzes:", err);
     res.status(500).send("Error fetching quizzes");
@@ -223,16 +211,13 @@ app.delete("/api/quizzes/:quizId", authenticateToken, async (req, res) => {
   const { quizId } = req.params;
 
   try {
-    // First, delete all choices related to questions in this quiz
     await db.query(
       "DELETE FROM Choices WHERE question_id IN (SELECT id FROM Questions WHERE quiz_id = ?)",
       [quizId]
     );
 
-    // Then, delete all questions related to this quiz
     await db.query("DELETE FROM Questions WHERE quiz_id = ?", [quizId]);
 
-    // Finally, delete the quiz itself
     await db.query("DELETE FROM Quizzes WHERE id = ?", [quizId]);
 
     res.json({ message: "Quiz deleted successfully" });
@@ -249,14 +234,12 @@ app.put("/api/quizzes/:quizId", authenticateToken, async (req, res) => {
   console.log(`Updating quiz ${quizId} with title '${title}'`);
 
   try {
-    // First, update the quiz title
     await db.query("UPDATE Quizzes SET title = ? WHERE id = ?", [
       title,
       quizId,
     ]);
     console.log(`Quiz title updated to '${title}'`);
 
-    // If there's a new question, check for duplicates before adding
     if (newQuestion) {
       console.log(
         `Checking for duplicate question '${newQuestion}' in quiz ${quizId}`
@@ -278,7 +261,6 @@ app.put("/api/quizzes/:quizId", authenticateToken, async (req, res) => {
         `No duplicate question found, adding new question '${newQuestion}'`
       );
 
-      // If no duplicates, add the new question
       await db.query(
         "INSERT INTO Questions (quiz_id, question_text, question_type) VALUES (?, ?, ?)",
         [quizId, newQuestion, "multiple-choice"]
@@ -332,7 +314,7 @@ app.get("/api/quizzes/:quizId/questions", authenticateToken, async (req, res) =>
       console.log("Query results:", results);
 
       if (results.length === 0) {
-        return res.json([]); // Return an empty array if no questions are found
+        return res.json([]); 
       }
 
       const questionsMap = new Map();
@@ -373,7 +355,6 @@ app.get("/api/questions/:questionId", authenticateToken, async (req, res) => {
   const { questionId } = req.params;
 
   try {
-    // Fetch the question details
     const [questionResults] = await db.query(
       "SELECT * FROM Questions WHERE id = ?",
       [questionId]
@@ -385,7 +366,6 @@ app.get("/api/questions/:questionId", authenticateToken, async (req, res) => {
 
     const question = questionResults[0];
 
-    // Fetch the choices for the question
     const [choiceResults] = await db.query(
       "SELECT * FROM Choices WHERE question_id = ?",
       [questionId]
@@ -403,10 +383,8 @@ app.delete( "/api/questions/:questionId", authenticateToken, async (req, res) =>
     const { questionId } = req.params;
 
     try {
-      // First, delete all choices related to this question
       await db.query("DELETE FROM Choices WHERE question_id = ?", [questionId]);
 
-      // Then, delete the question itself
       await db.query("DELETE FROM Questions WHERE id = ?", [questionId]);
 
       res.json({ message: "Question deleted successfully" });
@@ -424,7 +402,6 @@ app.put("/api/questions/:questionId", authenticateToken, async (req, res) => {
   console.log("Received data:", req.body);
 
   try {
-    // Check for duplicate question text
     const [duplicateResults] = await db.query(
       "SELECT * FROM Questions WHERE question_text = ? AND id != ? AND quiz_id = (SELECT quiz_id FROM Questions WHERE id = ?)",
       [question_text, questionId, questionId]
@@ -434,7 +411,6 @@ app.put("/api/questions/:questionId", authenticateToken, async (req, res) => {
       return res.status(400).json({ error: "Duplicate question text found" });
     }
 
-    // Check for duplicate answers within the same question
     if (question_type === "multiple-choice" && Array.isArray(choices)) {
       const uniqueChoices = new Set(
         choices.map((choice) => choice.choice_text)
@@ -528,7 +504,6 @@ const convertPdfToImage = async (filePath) => {
           return reject(new Error("Failed to convert PDF to images."));
         }
 
-        // Check if image files were created
         const imageFiles = fs
           .readdirSync(path.dirname(filePath))
           .filter(
@@ -633,7 +608,6 @@ app.get("/api/exam-info/:exam_id", async (req, res) => {
   const examId = req.params.exam_id;
 
   try {
-    // Fetch exam details
     const [examDetails] = await db.query(
       "SELECT * FROM quizzes WHERE exam_id = ?",
       [examId]
@@ -644,7 +618,6 @@ app.get("/api/exam-info/:exam_id", async (req, res) => {
       return res.status(404).json({ message: "Exam not found" });
     }
 
-    // Fetch questions related to the quiz
     const [questions] = await db.query(
       "SELECT * FROM questions WHERE quiz_id = ?",
       [examDetails[0].id]
@@ -653,7 +626,6 @@ app.get("/api/exam-info/:exam_id", async (req, res) => {
 
     let choices = [];
     if (questions.length > 0) {
-      // Fetch choices for each question
       const questionIds = questions.map((q) => q.id);
       [choices] = await db.query(
         "SELECT * FROM choices WHERE question_id IN (?)",
@@ -662,7 +634,6 @@ app.get("/api/exam-info/:exam_id", async (req, res) => {
       console.log("Choices: ", choices);
     }
 
-    // Organize data into a structured format
     const examData = {
       exam_info: examDetails[0],
       questions: questions.map((question) => ({
@@ -681,10 +652,9 @@ app.get("/api/exam-info/:exam_id", async (req, res) => {
 
 app.get("/api/exam/:examId", async (req, res) => {
   const { examId } = req.params;
-  const { maxScore } = req.query; // Get maxScore from query params
+  const { maxScore } = req.query; 
 
   try {
-    // Fetch exam title from the quizzes table
     const [examInfo] = await db.query(
       `SELECT title FROM quizzes WHERE exam_id = ?`,
       [examId]
@@ -694,19 +664,16 @@ app.get("/api/exam/:examId", async (req, res) => {
       return res.status(404).json({ message: "Exam not found" });
     }
 
-    // Fetch questions for the quiz
     const [questions] = await db.query(
       `SELECT id, question_text FROM questions WHERE quiz_id = ?`,
       [examId]
     );
 
-    // Fetch student results for the exam
     const [studentResults] = await db.query(
       `SELECT id, name, cin, class, score FROM studentresults WHERE exam_id = ?`,
       [examId]
     );
 
-    // Fetch student answers for the exam
     const [studentAnswers] = await db.query(
       `SELECT student_id, question, chosen_options, is_correct, correct_answers 
        FROM studentanswers 
@@ -714,7 +681,6 @@ app.get("/api/exam/:examId", async (req, res) => {
       [examId]
     );
 
-    // Combine student results and answers
     const students = studentResults.map((student) => {
       const answers = studentAnswers
         .filter((answer) => answer.student_id === student.id)
@@ -740,9 +706,9 @@ app.get("/api/exam/:examId", async (req, res) => {
       exam_info: {
         title: examInfo[0].title,
         exam_id: examId,
-        max_score: maxScore || 20, // Use maxScore from query or default to 20
+        max_score: maxScore || 20, 
       },
-      questions: questions, // Include questions in the response
+      questions: questions, 
       students: students,
     });
   } catch (error) {
@@ -760,7 +726,6 @@ app.post("/api/save-results", async (req, res) => {
   }
 
   try {
-    // Prepare student results for insertion or update
     const studentValues = students.map((student) => [
       student.student_info?.Name || "Unknown",
       student.student_info?.CIN || "N/A",
@@ -769,7 +734,6 @@ app.post("/api/save-results", async (req, res) => {
       student.score,
     ]);
 
-    // Insert or update student results
     const studentSql = `
       INSERT INTO StudentResults (name, cin, class, exam_id, score) 
       VALUES ?
@@ -777,7 +741,6 @@ app.post("/api/save-results", async (req, res) => {
     `;
     await db.query(studentSql, [studentValues]);
 
-    // Fetch all student IDs for the current exam
     const [studentIds] = await db.query(
       `SELECT id, name, cin, class 
        FROM StudentResults 
@@ -785,14 +748,12 @@ app.post("/api/save-results", async (req, res) => {
       [examId]
     );
 
-    // Create a map of student IDs for quick lookup
     const studentIdMap = new Map();
     studentIds.forEach((student) => {
       const key = `${student.name}-${student.cin}-${student.class}`;
       studentIdMap.set(key, student.id);
     });
 
-    // Prepare student answers for insertion
     const answerValues = [];
     students.forEach((student) => {
       const key = `${student.student_info?.Name || "Unknown"}-${
@@ -803,18 +764,17 @@ app.post("/api/save-results", async (req, res) => {
       if (studentId) {
         student.answers.forEach((answer) => {
           answerValues.push([
-            studentId, // Student ID
+            studentId, 
             examId,
             answer.question,
-            answer.selectedChoices.join(", "), // Chosen options
-            answer.isCorrect ? 1 : 0, // Mark as correct or incorrect
-            answer.correctAnswers.join(", "), // Correct options
+            answer.selectedChoices.join(", "), 
+            answer.isCorrect ? 1 : 0, 
+            answer.correctAnswers.join(", "), 
           ]);
         });
       }
     });
 
-    // Insert student answers
     if (answerValues.length > 0) {
       const answerSql = `
         INSERT INTO StudentAnswers (student_id, exam_id, question, chosen_options, is_correct, correct_answers) 
