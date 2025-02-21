@@ -283,9 +283,10 @@ app.get("/api/quizzes/:quizId", authenticateToken, async (req, res) => {
   const { quizId } = req.params;
 
   try {
-    const [results] = await db.query("SELECT title FROM Quizzes WHERE id = ?", [
-      quizId,
-    ]);
+    const [results] = await db.query(
+      "SELECT id, title, exam_id FROM Quizzes WHERE id = ?",
+      [quizId]
+    );
 
     if (results.length === 0) {
       return res.status(404).json({ error: "Quiz not found" });
